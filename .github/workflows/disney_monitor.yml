@@ -30,9 +30,10 @@ jobs:
           DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
           DISNEY_API_KEY: ${{ secrets.DISNEY_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          TARGET_DATE: ${{ secrets.TARGET_DATE || '2026-11-22' }}
-          PARTY_SIZE: ${{ secrets.PARTY_SIZE || '2' }}
-          MEAL_PERIOD: ${{ secrets.MEAL_PERIOD || 'Lunch' }}
-          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID || 'P2TR02' }}
+          TARGET_DATE: ${{ secrets.TARGET_DATE }}
+          PARTY_SIZE: ${{ secrets.PARTY_SIZE }}
+          MEAL_PERIOD: ${{ secrets.MEAL_PERIOD }}
+          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID }}
+          RESTAURANT_NAME: ${{ secrets.RESTAURANT_NAME }}
         run: |
           python disney_monitor.py --once
