@@ -1,15 +1,15 @@
 name: Disney Dining Monitor
 
 on:
+  workflow_dispatch: # Permite iniciar el relevo o probarlo manualmente con 1 clic
   schedule:
-    # Se ejecuta automáticamente cada 15 minutos en los servidores de GitHub
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # Permite probarlo manualmente con un clic desde la web de GitHub
+    # Mantenemos también un cron de respaldo cada 6 horas por si acaso
+    - cron: '0 */6 * * *'
 
 jobs:
-  check-availability:
+  continuous-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350 # Permite turnos continuos de hasta 5.5 horas
 
     steps:
       - name: Checkout del código
@@ -25,7 +25,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Consultar disponibilidad en Disney
+      - name: Monitoreo continuo con relevo automático
         env:
           DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
           DISNEY_REFRESH_TOKEN: ${{ secrets.DISNEY_REFRESH_TOKEN }}
@@ -36,5 +36,7 @@ jobs:
           MEAL_PERIOD: ${{ secrets.MEAL_PERIOD }}
           RESTAURANT_ID: ${{ secrets.RESTAURANT_ID }}
           RESTAURANT_NAME: ${{ secrets.RESTAURANT_NAME }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python disney_monitor.py --once
+          python disney_monitor.py --relay --max-hours 5.0

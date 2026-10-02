@@ -1,12 +1,14 @@
 """
 =============================================================================
-Disneyland Paris - Restaurant Availability Monitor (Auto-Refresh Edition)
+Disneyland Paris - Restaurant Availability Monitor (Relay Edition)
 =============================================================================
 Script de monitoreo automatizado de disponibilidad de mesas en Disneyland Paris.
 Diseñado para consultar directamente la API interna de Book-Dine de Disney.
-Soporta Auto-Refresh de sesión mediante el endpoint oficial de Disney OneID:
-/guest/refresh-auth con DISNEY_REFRESH_TOKEN.
-Zero-Hardcoding: Toda la configuración se carga estrictamente desde el entorno.
+Soporta:
+1. Auto-Refresh de sesión mediante OneID (DISNEY_REFRESH_TOKEN).
+2. Modo Relevo (--relay) para ejecución continua 24/7 en GitHub Actions
+   (turnos de 5 horas que se re-disparan automáticamente sin parar).
+3. Notificación de inicio a ntfy para comprobación inmediata en tu móvil.
 =============================================================================
 """
 
@@ -19,13 +21,15 @@ import argparse
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-# Asegurar soporte de caracteres UTF-8 en consolas de Windows
-if sys.platform.startswith("win"):
+# Asegurar soporte de caracteres UTF-8 en consolas de Windows y flushing inmediato
+if hasattr(sys.stdout, "reconfigure"):
     try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     except Exception:
         pass
 
@@ -36,7 +40,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =============================================================================
-# CONSTANTES DE ENDPOINT DE DISNEY
+# CONSTANTES DE ENDPOINTS
 # =============================================================================
 DISNEY_AVAILABILITY_URL = (
     "https://dlp-is-sales-drs-book-dine.wdprapps.disney.com"
@@ -48,12 +52,14 @@ DISNEY_REFRESH_URL = (
 BOOKING_PAGE_URL = "https://bookrestaurants.disneylandparis.com/en-int?id={restaurant_id}"
 
 # Configuración de registro (Logging)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+handler.setFormatter(formatter)
+
 logger = logging.getLogger("DisneyMonitor")
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+logger.addHandler(handler)
 
 
 def mask_secret(value: Optional[str], visible_chars: int = 4) -> str:
@@ -96,7 +102,7 @@ def refresh_access_token(refresh_token: str) -> Optional[str]:
                 logger.info("✨ Token de Disney renovado automáticamente con éxito vía OneID.")
                 return new_access_token
             else:
-                logger.error("❌ Respuesta 200 de Disney pero no se encontró access_token en el JSON.")
+                logger.error("❌ Respuesta 200 de Disney pero no se encontró access_token.")
                 return None
         else:
             logger.error(
@@ -104,7 +110,7 @@ def refresh_access_token(refresh_token: str) -> Optional[str]:
             )
             return None
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error de conexión al intentar renovar el token: {e}")
+        logger.error(f"❌ Error de red al intentar renovar el token: {e}")
         return None
 
 
@@ -146,7 +152,6 @@ def check_availability(
     target_date: str,
     party_size: int,
     headers: Dict[str, str],
-    ntfy_channel: Optional[str] = None,
     timeout: int = 15,
 ) -> Optional[List[Dict[str, Any]]]:
     """Realiza la petición HTTP POST al endpoint de disponibilidad de Disney."""
@@ -170,9 +175,7 @@ def check_availability(
             return response.json()
 
         if response.status_code in (401, 403):
-            logger.error(
-                f"❌ Error {response.status_code}: Token caducado o sin permisos."
-            )
+            logger.error(f"❌ Error {response.status_code}: Token caducado o sin permisos.")
             return None
 
         if response.status_code == 429:
@@ -232,7 +235,7 @@ def send_ntfy_alert(
     slots: List[str],
     restaurant_id: str,
 ) -> bool:
-    """Envía notificación push de mesa disponible."""
+    """Envía notificación push urgente cuando se encuentra mesa libre."""
     if not ntfy_url_or_topic:
         return False
 
@@ -266,27 +269,54 @@ def send_ntfy_alert(
         return False
 
 
-def send_token_expired_alert(ntfy_url_or_topic: str) -> None:
-    """Envía advertencia si el token caduca definitivamente."""
+def send_startup_ping(ntfy_url_or_topic: str, restaurant_name: str, target_date: str, mode: str) -> None:
+    """Envía una notificación informativa de inicio para confirmar que el bot está activo."""
+    if not ntfy_url_or_topic:
+        return
     url = (
         ntfy_url_or_topic.strip()
         if ntfy_url_or_topic.startswith("http")
         else f"https://ntfy.sh/{ntfy_url_or_topic.strip()}"
     )
-    title = "⚠️ DISNEY MONITOR: TOKEN EXPIRADO"
+    title = "🚀 MONITOR ACTIVO EN LA NUBE (GITHUB)"
     message = (
-        "El token de autorización de Disney ha caducado. "
-        "Inicia sesión en la web de Disney y actualiza DISNEY_REFRESH_TOKEN para reanudar el monitoreo."
+        f"El monitor ha comenzado su turno en GitHub Actions ({mode}).\n"
+        f"📍 Restaurante: {restaurant_name}\n"
+        f"📅 Fecha: {target_date}\n"
+        f"⏱️ Chequeando disponibilidad cada 10 a 15 minutos de forma continua."
     )
     headers = {
         "Title": title,
-        "Priority": "high",
-        "Tags": "warning,key",
+        "Priority": "default",
+        "Tags": "white_check_mark,robot",
     }
     try:
         requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
-    except Exception:
-        pass
+        logger.info("📢 Notificación push de inicio enviada a ntfy.")
+    except Exception as e:
+        logger.warning(f"No se pudo enviar ping de inicio: {e}")
+
+
+def trigger_next_relay_workflow(repo_slug: str, pat_token: str) -> bool:
+    """Dispara automáticamente el siguiente turno de 5 horas en GitHub Actions."""
+    url = f"https://api.github.com/repos/{repo_slug}/actions/workflows/disney_monitor.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {pat_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Disney-Dining-Monitor-Relay",
+    }
+    payload = {"ref": "main"}
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        if res.status_code == 204:
+            logger.info("🎉 ¡Siguiente turno de relevo disparado con éxito en GitHub Actions!")
+            return True
+        else:
+            logger.error(f"❌ Error al disparar relevo en GitHub API: HTTP {res.status_code} - {res.text}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Excepción al disparar relevo en GitHub: {e}")
+        return False
 
 
 # =============================================================================
@@ -297,7 +327,18 @@ def main():
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Ejecuta una sola consulta y finaliza (ideal para GitHub Actions o Cron jobs)",
+        help="Ejecuta una sola consulta y finaliza",
+    )
+    parser.add_argument(
+        "--relay",
+        action="store_true",
+        help="Modo relevo continuo 24/7 para GitHub Actions (corre 5 horas continuas y se re-dispara)",
+    )
+    parser.add_argument(
+        "--max-hours",
+        type=float,
+        default=5.0,
+        help="Duración máxima en horas del turno antes del relevo (default: 5.0)",
     )
     args = parser.parse_args()
 
@@ -305,6 +346,8 @@ def main():
     refresh_token = os.getenv("DISNEY_REFRESH_TOKEN")
     api_key = os.getenv("DISNEY_API_KEY")
     ntfy_channel = os.getenv("NTFY_TOPIC")
+    github_pat = os.getenv("GH_PAT")
+    github_repo = os.getenv("GITHUB_REPOSITORY", "j0serca/disney-dining-monitor")
     
     restaurant_id = os.getenv("RESTAURANT_ID")
     restaurant_name = os.getenv("RESTAURANT_NAME", "Restaurante Disney")
@@ -315,7 +358,7 @@ def main():
     min_delay_mins = float(os.getenv("MIN_DELAY_MINUTES", "10"))
     max_delay_mins = float(os.getenv("MAX_DELAY_MINUTES", "15"))
 
-    # Validaciones
+    # Validaciones obligatorias
     missing = []
     if not auth_token and not refresh_token:
         missing.append("DISNEY_AUTH_TOKEN o DISNEY_REFRESH_TOKEN")
@@ -331,32 +374,25 @@ def main():
         missing.append("PARTY_SIZE")
 
     if missing:
-        logger.error(
-            f"\n[ERROR DE CONFIGURACIÓN] Faltan los siguientes secretos requeridos:\n"
-            f" 👉 {', '.join(missing)}\n"
-        )
+        logger.error(f"\n[ERROR DE CONFIGURACIÓN] Faltan los siguientes secretos:\n 👉 {', '.join(missing)}\n")
         sys.exit(1)
 
     party_size = int(party_size_raw)
 
-    # Lógica de Auto-Refresh Inteligente:
-    # Si tenemos DISNEY_REFRESH_TOKEN, renovamos el access_token automáticamente
+    # Auto-Refresh de access_token al iniciar
     if refresh_token:
-        logger.info("🔄 DISNEY_REFRESH_TOKEN detectado. Obteniendo access_token fresco de Disney OneID...")
+        logger.info("🔄 DISNEY_REFRESH_TOKEN detectado. Obteniendo access_token fresco...")
         new_token = refresh_access_token(refresh_token)
         if new_token:
             auth_token = new_token
-        else:
-            logger.warning("⚠️ No se pudo auto-renovar con refresh_token. Intentando con DISNEY_AUTH_TOKEN existente...")
 
     if not auth_token:
         logger.error("❌ No hay un access_token válido disponible.")
-        if ntfy_channel:
-            send_token_expired_alert(ntfy_channel)
         sys.exit(1)
 
+    mode_label = "MODO ONCE" if args.once else ("MODO RELEVO 24/7" if args.relay else "MODO LOCAL")
     logger.info("=" * 65)
-    logger.info(f"🏰 MONITOR DE DISPONIBILIDAD - DISNEYLAND PARIS {'[MODO ONCE]' if args.once else ''}")
+    logger.info(f"🏰 MONITOR DE DISPONIBILIDAD - DISNEYLAND PARIS [{mode_label}]")
     logger.info("=" * 65)
     logger.info(f"📍 Restaurante  : {restaurant_name} (ID: {restaurant_id})")
     logger.info(f"📅 Fecha         : {target_date}")
@@ -369,12 +405,18 @@ def main():
         logger.info(f"🔄 Refresh Token : {mask_secret(refresh_token)} (Auto-Refresh ACTIVO ✅)")
     if not args.once:
         logger.info(f"⏳ Intervalo     : {min_delay_mins} a {max_delay_mins} minutos (con jitter)")
+        if args.relay:
+            logger.info(f"⏱️ Turno Relevo  : {args.max_hours} horas continuas")
     logger.info("-" * 65)
+
+    # Notificación push informativa a tu móvil de que el monitor está activo
+    if args.relay or not args.once:
+        send_startup_ping(ntfy_channel, restaurant_name, target_date, mode_label)
 
     session = requests.Session()
     headers = build_headers(api_key=api_key, auth_token=auth_token)
 
-    # Modo puntual (GitHub Actions)
+    # Modo puntual individual
     if args.once:
         logger.info("🔍 Ejecutando verificación puntual...")
         data = check_availability(
@@ -383,35 +425,26 @@ def main():
             target_date=target_date,
             party_size=party_size,
             headers=headers,
-            ntfy_channel=ntfy_channel,
         )
-
         if data is not None:
             available_slots = parse_available_slots(data, target_period=meal_period)
             if available_slots:
-                logger.info("🎉" * 20)
                 logger.info(f"🚨 ¡¡MESAS ENCONTRADAS!! Horarios: {available_slots}")
-                logger.info("🎉" * 20)
-                send_ntfy_alert(
-                    ntfy_url_or_topic=ntfy_channel,
-                    restaurant_name=restaurant_name,
-                    target_date=target_date,
-                    slots=available_slots,
-                    restaurant_id=restaurant_id,
-                )
+                send_ntfy_alert(ntfy_channel, restaurant_name, target_date, available_slots, restaurant_id)
             else:
                 logger.info(f"ℹ️ Sin mesas libres de '{meal_period}' para {party_size} comensales el {target_date}.")
-        else:
-            logger.warning("⚠️ No se pudo obtener respuesta válida de Disney.")
         return
 
-    # Modo continuo local
+    # Modo bucle continuo (Local o Relevo 24/7 en GitHub Actions)
+    start_time = time.time()
+    max_seconds = args.max_hours * 3600
     iteration = 1
+
     while True:
         timestamp_str = datetime.now().strftime("%H:%M:%S")
         logger.info(f"🔍 [Intento #{iteration} - {timestamp_str}] Verificando disponibilidad...")
 
-        # Si tenemos refresh token, refrescamos periódicamente
+        # Renovar access token cada 2 horas automáticamente si tenemos refresh token
         if refresh_token and iteration > 1:
             fresh_token = refresh_access_token(refresh_token)
             if fresh_token:
@@ -424,30 +457,33 @@ def main():
             target_date=target_date,
             party_size=party_size,
             headers=headers,
-            ntfy_channel=ntfy_channel,
         )
 
         if data is not None:
             available_slots = parse_available_slots(data, target_period=meal_period)
-
             if available_slots:
                 logger.info("🎉" * 20)
                 logger.info(f"🚨 ¡¡MESAS ENCONTRADAS!! Horarios: {available_slots}")
                 logger.info("🎉" * 20)
-
-                send_ntfy_alert(
-                    ntfy_url_or_topic=ntfy_channel,
-                    restaurant_name=restaurant_name,
-                    target_date=target_date,
-                    slots=available_slots,
-                    restaurant_id=restaurant_id,
-                )
+                send_ntfy_alert(ntfy_channel, restaurant_name, target_date, available_slots, restaurant_id)
             else:
                 logger.info(
-                    f"ℹ️ Sin disponibilidad de '{meal_period}' para {party_size} personas el {target_date}."
+                    f"ℹ️ Sin disponibilidad de '{meal_period}' para {party_size} comensales el {target_date}."
                 )
         else:
             logger.warning("⚠️ No se pudo obtener respuesta válida en este intento.")
+
+        # Si estamos en modo relevo, verificar si cumplimos el tiempo del turno
+        elapsed = time.time() - start_time
+        if args.relay and elapsed >= max_seconds:
+            logger.info("=" * 65)
+            logger.info(f"🏁 Turno completado ({elapsed / 3600:.2f} horas). Pasando el relevo al siguiente runner...")
+            logger.info("=" * 65)
+            if github_pat:
+                trigger_next_relay_workflow(github_repo, github_pat)
+            else:
+                logger.warning("⚠️ No se encontró GH_PAT para re-disparar el relevo automáticamente.")
+            break
 
         jitter_seconds = random.uniform(min_delay_mins * 60, max_delay_mins * 60)
         next_check_mins = jitter_seconds / 60
