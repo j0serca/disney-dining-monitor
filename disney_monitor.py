@@ -5,10 +5,9 @@ Disneyland Paris - Restaurant Availability Monitor (Relay Edition)
 Script de monitoreo automatizado de disponibilidad de mesas en Disneyland Paris.
 Diseñado para consultar directamente la API interna de Book-Dine de Disney.
 Soporta:
-1. Auto-Refresh de sesión mediante OneID (DISNEY_REFRESH_TOKEN).
-2. Modo Relevo (--relay) para ejecución continua 24/7 en GitHub Actions
-   (turnos de 5 horas que se re-disparan automáticamente sin parar).
-3. Notificación de inicio a ntfy para comprobación inmediata en tu móvil.
+1. Modo Relevo continuo (--relay) para GitHub Actions (turnos de 5 horas).
+2. Notificaciones push limpias (compatibles con RFC 7230 / ntfy).
+3. Uso prioritario de DISNEY_AUTH_TOKEN con soporte opcional de refresh.
 =============================================================================
 """
 
@@ -75,10 +74,7 @@ def mask_secret(value: Optional[str], visible_chars: int = 4) -> str:
 # 1. FUNCIÓN DE AUTO-REFRESH DE TOKEN (DISNEY ONEID)
 # =============================================================================
 def refresh_access_token(refresh_token: str) -> Optional[str]:
-    """
-    Renueva automáticamente el access_token utilizando el refreshToken de Disney OneID.
-    Permite que el script funcione de forma 100% autónoma durante semanas o meses.
-    """
+    """Intenta renovar el access_token utilizando el refreshToken de OneID."""
     headers = {
         "Accept": "*/*",
         "Content-Type": "application/json",
@@ -99,18 +95,11 @@ def refresh_access_token(refresh_token: str) -> Optional[str]:
             token_obj = data.get("token", {}) if data else {}
             new_access_token = token_obj.get("access_token")
             if new_access_token:
-                logger.info("✨ Token de Disney renovado automáticamente con éxito vía OneID.")
+                logger.info("✨ Token de Disney renovado automáticamente vía OneID.")
                 return new_access_token
-            else:
-                logger.error("❌ Respuesta 200 de Disney pero no se encontró access_token.")
-                return None
-        else:
-            logger.error(
-                f"❌ Error al renovar token en Disney OneID: HTTP {response.status_code} - {response.text[:200]}"
-            )
-            return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error de red al intentar renovar el token: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"No se pudo contactar el servicio de refresh: {e}")
         return None
 
 
@@ -226,7 +215,7 @@ def parse_available_slots(
 
 
 # =============================================================================
-# 5. SISTEMA DE ALERTAS (ntfy.sh)
+# 5. SISTEMA DE ALERTAS (ntfy.sh) - CABECERAS LIMPIAS (RFC 7230)
 # =============================================================================
 def send_ntfy_alert(
     ntfy_url_or_topic: str,
@@ -248,29 +237,30 @@ def send_ntfy_alert(
     booking_link = BOOKING_PAGE_URL.format(restaurant_id=restaurant_id)
     slots_str = ", ".join(slots)
     
-    title = f"🍽️ ¡MESA DISPONIBLE EN {restaurant_name.upper()}!"
-    message = (
-        f"¡Se han encontrado horarios disponibles para el {target_date}!\n\n"
-        f"⏰ Horarios: {slots_str}\n\n"
-        f"Toca esta notificación para reservar de inmediato antes de que se agoten:"
-    )
-
+    # En las cabeceras HTTP solo texto ASCII; los emojis van en Tags o en el mensaje
     headers = {
-        "Title": title,
+        "Title": f"MESA DISPONIBLE EN {restaurant_name.upper()}!",
         "Priority": "urgent",
         "Tags": "tada,fork_and_knife,disney",
         "Click": booking_link,
     }
+    
+    message = (
+        f"¡Se han encontrado horarios disponibles para el {target_date}!\n\n"
+        f"⏰ Horarios: {slots_str}\n\n"
+        f"Toca esta notificación para reservar de inmediato antes de que se agoten."
+    )
 
     try:
         res = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
         return res.status_code == 200
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error al enviar alerta a ntfy: {e}")
         return False
 
 
 def send_startup_ping(ntfy_url_or_topic: str, restaurant_name: str, target_date: str, mode: str) -> None:
-    """Envía una notificación informativa de inicio para confirmar que el bot está activo."""
+    """Envía un ping de confirmación al iniciar el turno."""
     if not ntfy_url_or_topic:
         return
     url = (
@@ -278,21 +268,23 @@ def send_startup_ping(ntfy_url_or_topic: str, restaurant_name: str, target_date:
         if ntfy_url_or_topic.startswith("http")
         else f"https://ntfy.sh/{ntfy_url_or_topic.strip()}"
     )
-    title = "🚀 MONITOR ACTIVO EN LA NUBE (GITHUB)"
-    message = (
-        f"El monitor ha comenzado su turno en GitHub Actions ({mode}).\n"
-        f"📍 Restaurante: {restaurant_name}\n"
-        f"📅 Fecha: {target_date}\n"
-        f"⏱️ Chequeando disponibilidad cada 10 a 15 minutos de forma continua."
-    )
     headers = {
-        "Title": title,
+        "Title": "MONITOR ACTIVO EN LA NUBE (GITHUB)",
         "Priority": "default",
-        "Tags": "white_check_mark,robot",
+        "Tags": "rocket,white_check_mark",
     }
+    message = (
+        f"El monitor ha comenzado su turno en GitHub Actions ({mode}).\n\n"
+        f"📍 Restaurante: {restaurant_name}\n"
+        f"📅 Fecha: {target_date}\n\n"
+        f"⏱️ Chequeando disponibilidad cada 10 a 15 minutos."
+    )
     try:
-        requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
-        logger.info("📢 Notificación push de inicio enviada a ntfy.")
+        res = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
+        if res.status_code == 200:
+            logger.info("🔔 Notificación push de inicio enviada exitosamente a ntfy.")
+        else:
+            logger.warning(f"ntfy devolvió status {res.status_code}")
     except Exception as e:
         logger.warning(f"No se pudo enviar ping de inicio: {e}")
 
@@ -312,7 +304,7 @@ def trigger_next_relay_workflow(repo_slug: str, pat_token: str) -> bool:
             logger.info("🎉 ¡Siguiente turno de relevo disparado con éxito en GitHub Actions!")
             return True
         else:
-            logger.error(f"❌ Error al disparar relevo en GitHub API: HTTP {res.status_code} - {res.text}")
+            logger.error(f"❌ Error al disparar relevo en GitHub API: HTTP {res.status_code}")
             return False
     except Exception as e:
         logger.error(f"❌ Excepción al disparar relevo en GitHub: {e}")
@@ -332,7 +324,7 @@ def main():
     parser.add_argument(
         "--relay",
         action="store_true",
-        help="Modo relevo continuo 24/7 para GitHub Actions (corre 5 horas continuas y se re-dispara)",
+        help="Modo relevo continuo 24/7 para GitHub Actions (turnos de 5 horas)",
     )
     parser.add_argument(
         "--max-hours",
@@ -358,7 +350,6 @@ def main():
     min_delay_mins = float(os.getenv("MIN_DELAY_MINUTES", "10"))
     max_delay_mins = float(os.getenv("MAX_DELAY_MINUTES", "15"))
 
-    # Validaciones obligatorias
     missing = []
     if not auth_token and not refresh_token:
         missing.append("DISNEY_AUTH_TOKEN o DISNEY_REFRESH_TOKEN")
@@ -379,17 +370,6 @@ def main():
 
     party_size = int(party_size_raw)
 
-    # Auto-Refresh de access_token al iniciar
-    if refresh_token:
-        logger.info("🔄 DISNEY_REFRESH_TOKEN detectado. Obteniendo access_token fresco...")
-        new_token = refresh_access_token(refresh_token)
-        if new_token:
-            auth_token = new_token
-
-    if not auth_token:
-        logger.error("❌ No hay un access_token válido disponible.")
-        sys.exit(1)
-
     mode_label = "MODO ONCE" if args.once else ("MODO RELEVO 24/7" if args.relay else "MODO LOCAL")
     logger.info("=" * 65)
     logger.info(f"🏰 MONITOR DE DISPONIBILIDAD - DISNEYLAND PARIS [{mode_label}]")
@@ -401,15 +381,13 @@ def main():
     logger.info(f"📢 Canal ntfy    : https://ntfy.sh/{mask_secret(ntfy_channel)}")
     logger.info(f"🔑 API Key       : {mask_secret(api_key)}")
     logger.info(f"🎟️ Auth Token    : {mask_secret(auth_token)}")
-    if refresh_token:
-        logger.info(f"🔄 Refresh Token : {mask_secret(refresh_token)} (Auto-Refresh ACTIVO ✅)")
     if not args.once:
         logger.info(f"⏳ Intervalo     : {min_delay_mins} a {max_delay_mins} minutos (con jitter)")
         if args.relay:
             logger.info(f"⏱️ Turno Relevo  : {args.max_hours} horas continuas")
     logger.info("-" * 65)
 
-    # Notificación push informativa a tu móvil de que el monitor está activo
+    # Enviar ping limpio a ntfy
     if args.relay or not args.once:
         send_startup_ping(ntfy_channel, restaurant_name, target_date, mode_label)
 
@@ -435,7 +413,7 @@ def main():
                 logger.info(f"ℹ️ Sin mesas libres de '{meal_period}' para {party_size} comensales el {target_date}.")
         return
 
-    # Modo bucle continuo (Local o Relevo 24/7 en GitHub Actions)
+    # Modo bucle continuo
     start_time = time.time()
     max_seconds = args.max_hours * 3600
     iteration = 1
@@ -444,13 +422,6 @@ def main():
         timestamp_str = datetime.now().strftime("%H:%M:%S")
         logger.info(f"🔍 [Intento #{iteration} - {timestamp_str}] Verificando disponibilidad...")
 
-        # Renovar access token cada 2 horas automáticamente si tenemos refresh token
-        if refresh_token and iteration > 1:
-            fresh_token = refresh_access_token(refresh_token)
-            if fresh_token:
-                auth_token = fresh_token
-                headers = build_headers(api_key=api_key, auth_token=auth_token)
-
         data = check_availability(
             session=session,
             restaurant_id=restaurant_id,
@@ -458,6 +429,20 @@ def main():
             party_size=party_size,
             headers=headers,
         )
+
+        # Si el token falló y tenemos refresh_token, intentamos refrescar como fallback
+        if data is None and refresh_token:
+            fresh = refresh_access_token(refresh_token)
+            if fresh:
+                auth_token = fresh
+                headers = build_headers(api_key=api_key, auth_token=auth_token)
+                data = check_availability(
+                    session=session,
+                    restaurant_id=restaurant_id,
+                    target_date=target_date,
+                    party_size=party_size,
+                    headers=headers,
+                )
 
         if data is not None:
             available_slots = parse_available_slots(data, target_period=meal_period)
@@ -473,7 +458,7 @@ def main():
         else:
             logger.warning("⚠️ No se pudo obtener respuesta válida en este intento.")
 
-        # Si estamos en modo relevo, verificar si cumplimos el tiempo del turno
+        # Verificar si cumplimos el tiempo del turno para pasar el relevo
         elapsed = time.time() - start_time
         if args.relay and elapsed >= max_seconds:
             logger.info("=" * 65)
@@ -481,8 +466,6 @@ def main():
             logger.info("=" * 65)
             if github_pat:
                 trigger_next_relay_workflow(github_repo, github_pat)
-            else:
-                logger.warning("⚠️ No se encontró GH_PAT para re-disparar el relevo automáticamente.")
             break
 
         jitter_seconds = random.uniform(min_delay_mins * 60, max_delay_mins * 60)
