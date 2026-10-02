@@ -67,8 +67,8 @@ def mask_secret(value: Optional[str], visible_chars: int = 4) -> str:
 # =============================================================================
 def build_headers(api_key: str, auth_token: str) -> Dict[str, str]:
     """
-    Construye las cabeceras HTTP necesarias para emular fielmente la petición
-    del navegador a la API de Disney sin exponer credenciales.
+    Construye las cabeceras HTTP necesarias para emular la petición
+    del navegador a la API de Disney.
     """
     formatted_token = (
         auth_token.strip()
@@ -103,6 +103,7 @@ def check_availability(
     target_date: str,
     party_size: int,
     headers: Dict[str, str],
+    ntfy_channel: Optional[str] = None,
     timeout: int = 15,
 ) -> Optional[List[Dict[str, Any]]]:
     """
@@ -127,15 +128,14 @@ def check_availability(
         if response.status_code == 200:
             return response.json()
 
-        if response.status_code == 401:
+        # Tanto 401 como 403 FORBIDDEN_SCOPE indican que el token expiró o es inválido
+        if response.status_code in (401, 403):
             logger.error(
-                "❌ Error 401 (No autorizado): El Token de Disney ha caducado o es inválido. "
-                "Por favor, renueva el token desde el navegador y actualiza tus Secrets / .env."
+                f"❌ Error {response.status_code} (Token inválido o expirado): Disney rechazó la sesión. "
+                "Es necesario renovar DISNEY_AUTH_TOKEN."
             )
-            return None
-
-        if response.status_code == 403:
-            logger.error("❌ Error 403 (Prohibido): Petición rechazada por Disney o API Key inválida.")
+            if ntfy_channel:
+                send_token_expired_alert(ntfy_channel)
             return None
 
         if response.status_code == 429:
@@ -198,7 +198,7 @@ def send_ntfy_alert(
     restaurant_id: str,
 ) -> bool:
     """
-    Envía una notificación push instantánea y gratuita a través de ntfy.sh con enlace directo de reserva.
+    Envía una notificación push instantánea cuando se encuentra mesa disponible.
     """
     if not ntfy_url_or_topic:
         logger.warning("⚠️ No se ha configurado NTFY_TOPIC en los secretos. Alerta omitida.")
@@ -222,9 +222,9 @@ def send_ntfy_alert(
 
     headers = {
         "Title": title,
-        "Priority": "urgent",       # Prioridad alta (sonido y vibración)
+        "Priority": "urgent",
         "Tags": "tada,fork_and_knife,disney",
-        "Click": booking_link,       # Al tocar la alerta abre la web de Disney
+        "Click": booking_link,
     }
 
     try:
@@ -240,6 +240,32 @@ def send_ntfy_alert(
         return False
 
 
+def send_token_expired_alert(ntfy_url_or_topic: str) -> None:
+    """
+    Envía una notificación de advertencia si el token de Disney caduca.
+    """
+    url = (
+        ntfy_url_or_topic.strip()
+        if ntfy_url_or_topic.startswith("http")
+        else f"https://ntfy.sh/{ntfy_url_or_topic.strip()}"
+    )
+    title = "⚠️ DISNEY MONITOR: TOKEN EXPIRADO"
+    message = (
+        "El token de autorización de Disney ha caducado. "
+        "Inicia sesión en la web de Disney y actualiza DISNEY_AUTH_TOKEN para reanudar el monitoreo."
+    )
+    headers = {
+        "Title": title,
+        "Priority": "high",
+        "Tags": "warning,key",
+    }
+    try:
+        requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
+        logger.info("📢 Notificación de token expirado enviada a ntfy.")
+    except Exception as e:
+        logger.warning(f"No se pudo enviar notificación de expiración: {e}")
+
+
 # =============================================================================
 # 5. EJECUCIÓN PRINCIPAL (TOTALMENTE BASADA EN SECRETOS / ENTORNO)
 # =============================================================================
@@ -252,7 +278,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Carga de credenciales y parámetros OBLIGATORIOS desde Secrets / .env
     auth_token = os.getenv("DISNEY_AUTH_TOKEN")
     api_key = os.getenv("DISNEY_API_KEY")
     ntfy_channel = os.getenv("NTFY_TOPIC")
@@ -263,11 +288,9 @@ def main():
     party_size_raw = os.getenv("PARTY_SIZE")
     meal_period = os.getenv("MEAL_PERIOD", "Lunch")
     
-    # Rango de retraso aleatorio para ejecución local continua
     min_delay_mins = float(os.getenv("MIN_DELAY_MINUTES", "10"))
     max_delay_mins = float(os.getenv("MAX_DELAY_MINUTES", "15"))
 
-    # Validar que los secretos y variables obligatorias existan
     missing = []
     if not auth_token:
         missing.append("DISNEY_AUTH_TOKEN")
@@ -284,9 +307,8 @@ def main():
 
     if missing:
         logger.error(
-            f"\n[ERROR DE CONFIGURACIÓN] Faltan los siguientes secretos/variables de entorno requeridos:\n"
+            f"\n[ERROR DE CONFIGURACIÓN] Faltan los siguientes secretos requeridos:\n"
             f" 👉 {', '.join(missing)}\n"
-            f"Asegúrate de definirlos en tu archivo .env (local) o en GitHub Secrets (remoto).\n"
         )
         sys.exit(1)
 
@@ -318,6 +340,7 @@ def main():
             target_date=target_date,
             party_size=party_size,
             headers=headers,
+            ntfy_channel=ntfy_channel,
         )
 
         if data is not None:
@@ -339,7 +362,7 @@ def main():
             logger.warning("⚠️ No se pudo obtener respuesta válida de Disney.")
         return
 
-    # Modo bucle continuo (local en PC)
+    # Modo continuo local
     iteration = 1
     while True:
         timestamp_str = datetime.now().strftime("%H:%M:%S")
@@ -351,6 +374,7 @@ def main():
             target_date=target_date,
             party_size=party_size,
             headers=headers,
+            ntfy_channel=ntfy_channel,
         )
 
         if data is not None:
