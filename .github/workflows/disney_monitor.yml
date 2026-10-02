@@ -1,0 +1,38 @@
+name: Disney Dining Monitor
+
+on:
+  schedule:
+    # Se ejecuta automáticamente cada 15 minutos en los servidores de GitHub
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Permite probarlo manualmente con un clic desde la web de GitHub
+
+jobs:
+  check-availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+
+      - name: Consultar disponibilidad en Disney
+        env:
+          DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
+          DISNEY_API_KEY: ${{ secrets.DISNEY_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TARGET_DATE: ${{ secrets.TARGET_DATE || '2026-11-22' }}
+          PARTY_SIZE: ${{ secrets.PARTY_SIZE || '2' }}
+          MEAL_PERIOD: ${{ secrets.MEAL_PERIOD || 'Lunch' }}
+          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID || 'P2TR02' }}
+        run: |
+          python disney_monitor.py --once

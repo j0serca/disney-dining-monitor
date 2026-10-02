@@ -1,0 +1,17 @@
+# Archivos de entorno y credenciales (¡NUNCA subir a GitHub!)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+
+# Archivos HAR y capturas pesadas
+*.har
+*.har.txt
+*.log
