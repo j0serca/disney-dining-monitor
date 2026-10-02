@@ -1,12 +1,12 @@
 """
 =============================================================================
-Disneyland Paris - Restaurant Availability Monitor
+Disneyland Paris - Restaurant Availability Monitor (Auto-Refresh Edition)
 =============================================================================
 Script de monitoreo automatizado de disponibilidad de mesas en Disneyland Paris.
-Diseñado para consultar directamente la API interna de Book-Dine de Disney
-utilizando peticiones HTTP (requests) de alta eficiencia, sin Selenium ni Playwright.
-Zero-Hardcoding: Toda la configuración sensible y parámetros se cargan
-estrictamente desde variables de entorno / GitHub Secrets.
+Diseñado para consultar directamente la API interna de Book-Dine de Disney.
+Soporta Auto-Refresh de sesión mediante el endpoint oficial de Disney OneID:
+/guest/refresh-auth con DISNEY_REFRESH_TOKEN.
+Zero-Hardcoding: Toda la configuración se carga estrictamente desde el entorno.
 =============================================================================
 """
 
@@ -36,11 +36,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =============================================================================
-# CONSTANTES DE ENDPOINT
+# CONSTANTES DE ENDPOINT DE DISNEY
 # =============================================================================
 DISNEY_AVAILABILITY_URL = (
     "https://dlp-is-sales-drs-book-dine.wdprapps.disney.com"
     "/prod/v4/book-dine/availabilities/en-int?scope=Restaurant"
+)
+DISNEY_REFRESH_URL = (
+    "https://registerdisney.go.com/jgc/v8/client/TPR-DLP.WEB-PROD/guest/refresh-auth"
 )
 BOOKING_PAGE_URL = "https://bookrestaurants.disneylandparis.com/en-int?id={restaurant_id}"
 
@@ -63,13 +66,53 @@ def mask_secret(value: Optional[str], visible_chars: int = 4) -> str:
 
 
 # =============================================================================
-# 1. FUNCIÓN DE CABECERAS DINÁMICAS
+# 1. FUNCIÓN DE AUTO-REFRESH DE TOKEN (DISNEY ONEID)
+# =============================================================================
+def refresh_access_token(refresh_token: str) -> Optional[str]:
+    """
+    Renueva automáticamente el access_token utilizando el refreshToken de Disney OneID.
+    Permite que el script funcione de forma 100% autónoma durante semanas o meses.
+    """
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Origin": "https://bookrestaurants.disneylandparis.com",
+        "Referer": "https://bookrestaurants.disneylandparis.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+
+    payload = {"refreshToken": refresh_token.strip()}
+
+    try:
+        response = requests.post(DISNEY_REFRESH_URL, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json().get("data", {})
+            token_obj = data.get("token", {}) if data else {}
+            new_access_token = token_obj.get("access_token")
+            if new_access_token:
+                logger.info("✨ Token de Disney renovado automáticamente con éxito vía OneID.")
+                return new_access_token
+            else:
+                logger.error("❌ Respuesta 200 de Disney pero no se encontró access_token en el JSON.")
+                return None
+        else:
+            logger.error(
+                f"❌ Error al renovar token en Disney OneID: HTTP {response.status_code} - {response.text[:200]}"
+            )
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error de conexión al intentar renovar el token: {e}")
+        return None
+
+
+# =============================================================================
+# 2. FUNCIÓN DE CABECERAS DINÁMICAS
 # =============================================================================
 def build_headers(api_key: str, auth_token: str) -> Dict[str, str]:
-    """
-    Construye las cabeceras HTTP necesarias para emular la petición
-    del navegador a la API de Disney.
-    """
+    """Construye las cabeceras HTTP necesarias para Disney API."""
     formatted_token = (
         auth_token.strip()
         if auth_token.strip().lower().startswith("bearer ")
@@ -95,7 +138,7 @@ def build_headers(api_key: str, auth_token: str) -> Dict[str, str]:
 
 
 # =============================================================================
-# 2. FUNCIÓN DE CONSULTA POST (API DISNEY)
+# 3. FUNCIÓN DE CONSULTA POST (API DISNEY)
 # =============================================================================
 def check_availability(
     session: requests.Session,
@@ -106,9 +149,7 @@ def check_availability(
     ntfy_channel: Optional[str] = None,
     timeout: int = 15,
 ) -> Optional[List[Dict[str, Any]]]:
-    """
-    Realiza la petición HTTP POST al endpoint de disponibilidad de Disneyland Paris.
-    """
+    """Realiza la petición HTTP POST al endpoint de disponibilidad de Disney."""
     payload = {
         "partyMix": party_size,
         "session": 0,
@@ -128,18 +169,14 @@ def check_availability(
         if response.status_code == 200:
             return response.json()
 
-        # Tanto 401 como 403 FORBIDDEN_SCOPE indican que el token expiró o es inválido
         if response.status_code in (401, 403):
             logger.error(
-                f"❌ Error {response.status_code} (Token inválido o expirado): Disney rechazó la sesión. "
-                "Es necesario renovar DISNEY_AUTH_TOKEN."
+                f"❌ Error {response.status_code}: Token caducado o sin permisos."
             )
-            if ntfy_channel:
-                send_token_expired_alert(ntfy_channel)
             return None
 
         if response.status_code == 429:
-            logger.warning("⚠️ Error 429 (Too Many Requests): Limitación temporal de peticiones.")
+            logger.warning("⚠️ Error 429: Limitación temporal de peticiones.")
             return None
 
         logger.error(
@@ -148,7 +185,7 @@ def check_availability(
         return None
 
     except requests.exceptions.Timeout:
-        logger.warning("⏱️ Timeout de conexión con Disney. Se reintentará en el próximo ciclo.")
+        logger.warning("⏱️ Timeout de conexión con Disney.")
         return None
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Error de red durante la consulta: {e}")
@@ -156,15 +193,13 @@ def check_availability(
 
 
 # =============================================================================
-# 3. FUNCIÓN DE PROCESAMIENTO DE RESPUESTA
+# 4. FUNCIÓN DE PROCESAMIENTO DE RESPUESTA
 # =============================================================================
 def parse_available_slots(
     response_data: Any,
     target_period: str = "Lunch",
 ) -> List[str]:
-    """
-    Examina el JSON retornado por Disney y extrae los horarios disponibles para el período buscado.
-    """
+    """Examina el JSON de Disney y extrae los horarios disponibles."""
     available_slots: List[str] = []
 
     if not isinstance(response_data, list):
@@ -188,7 +223,7 @@ def parse_available_slots(
 
 
 # =============================================================================
-# 4. SISTEMA DE ALERTAS GRATUITO (ntfy.sh)
+# 5. SISTEMA DE ALERTAS (ntfy.sh)
 # =============================================================================
 def send_ntfy_alert(
     ntfy_url_or_topic: str,
@@ -197,11 +232,8 @@ def send_ntfy_alert(
     slots: List[str],
     restaurant_id: str,
 ) -> bool:
-    """
-    Envía una notificación push instantánea cuando se encuentra mesa disponible.
-    """
+    """Envía notificación push de mesa disponible."""
     if not ntfy_url_or_topic:
-        logger.warning("⚠️ No se ha configurado NTFY_TOPIC en los secretos. Alerta omitida.")
         return False
 
     url = (
@@ -229,21 +261,13 @@ def send_ntfy_alert(
 
     try:
         res = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
-        if res.status_code == 200:
-            logger.info("🔔 ¡Alerta enviada exitosamente a tu canal de ntfy!")
-            return True
-        else:
-            logger.error(f"❌ Error al enviar notificación a ntfy: HTTP {res.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error al conectar con ntfy: {e}")
+        return res.status_code == 200
+    except Exception:
         return False
 
 
 def send_token_expired_alert(ntfy_url_or_topic: str) -> None:
-    """
-    Envía una notificación de advertencia si el token de Disney caduca.
-    """
+    """Envía advertencia si el token caduca definitivamente."""
     url = (
         ntfy_url_or_topic.strip()
         if ntfy_url_or_topic.startswith("http")
@@ -252,7 +276,7 @@ def send_token_expired_alert(ntfy_url_or_topic: str) -> None:
     title = "⚠️ DISNEY MONITOR: TOKEN EXPIRADO"
     message = (
         "El token de autorización de Disney ha caducado. "
-        "Inicia sesión en la web de Disney y actualiza DISNEY_AUTH_TOKEN para reanudar el monitoreo."
+        "Inicia sesión en la web de Disney y actualiza DISNEY_REFRESH_TOKEN para reanudar el monitoreo."
     )
     headers = {
         "Title": title,
@@ -261,13 +285,12 @@ def send_token_expired_alert(ntfy_url_or_topic: str) -> None:
     }
     try:
         requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
-        logger.info("📢 Notificación de token expirado enviada a ntfy.")
-    except Exception as e:
-        logger.warning(f"No se pudo enviar notificación de expiración: {e}")
+    except Exception:
+        pass
 
 
 # =============================================================================
-# 5. EJECUCIÓN PRINCIPAL (TOTALMENTE BASADA EN SECRETOS / ENTORNO)
+# 6. EJECUCIÓN PRINCIPAL
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(description="Disney Restaurant Availability Monitor")
@@ -279,6 +302,7 @@ def main():
     args = parser.parse_args()
 
     auth_token = os.getenv("DISNEY_AUTH_TOKEN")
+    refresh_token = os.getenv("DISNEY_REFRESH_TOKEN")
     api_key = os.getenv("DISNEY_API_KEY")
     ntfy_channel = os.getenv("NTFY_TOPIC")
     
@@ -291,9 +315,10 @@ def main():
     min_delay_mins = float(os.getenv("MIN_DELAY_MINUTES", "10"))
     max_delay_mins = float(os.getenv("MAX_DELAY_MINUTES", "15"))
 
+    # Validaciones
     missing = []
-    if not auth_token:
-        missing.append("DISNEY_AUTH_TOKEN")
+    if not auth_token and not refresh_token:
+        missing.append("DISNEY_AUTH_TOKEN o DISNEY_REFRESH_TOKEN")
     if not api_key:
         missing.append("DISNEY_API_KEY")
     if not ntfy_channel:
@@ -314,6 +339,22 @@ def main():
 
     party_size = int(party_size_raw)
 
+    # Lógica de Auto-Refresh Inteligente:
+    # Si tenemos DISNEY_REFRESH_TOKEN, renovamos el access_token automáticamente
+    if refresh_token:
+        logger.info("🔄 DISNEY_REFRESH_TOKEN detectado. Obteniendo access_token fresco de Disney OneID...")
+        new_token = refresh_access_token(refresh_token)
+        if new_token:
+            auth_token = new_token
+        else:
+            logger.warning("⚠️ No se pudo auto-renovar con refresh_token. Intentando con DISNEY_AUTH_TOKEN existente...")
+
+    if not auth_token:
+        logger.error("❌ No hay un access_token válido disponible.")
+        if ntfy_channel:
+            send_token_expired_alert(ntfy_channel)
+        sys.exit(1)
+
     logger.info("=" * 65)
     logger.info(f"🏰 MONITOR DE DISPONIBILIDAD - DISNEYLAND PARIS {'[MODO ONCE]' if args.once else ''}")
     logger.info("=" * 65)
@@ -324,6 +365,8 @@ def main():
     logger.info(f"📢 Canal ntfy    : https://ntfy.sh/{mask_secret(ntfy_channel)}")
     logger.info(f"🔑 API Key       : {mask_secret(api_key)}")
     logger.info(f"🎟️ Auth Token    : {mask_secret(auth_token)}")
+    if refresh_token:
+        logger.info(f"🔄 Refresh Token : {mask_secret(refresh_token)} (Auto-Refresh ACTIVO ✅)")
     if not args.once:
         logger.info(f"⏳ Intervalo     : {min_delay_mins} a {max_delay_mins} minutos (con jitter)")
     logger.info("-" * 65)
@@ -367,6 +410,13 @@ def main():
     while True:
         timestamp_str = datetime.now().strftime("%H:%M:%S")
         logger.info(f"🔍 [Intento #{iteration} - {timestamp_str}] Verificando disponibilidad...")
+
+        # Si tenemos refresh token, refrescamos periódicamente
+        if refresh_token and iteration > 1:
+            fresh_token = refresh_access_token(refresh_token)
+            if fresh_token:
+                auth_token = fresh_token
+                headers = build_headers(api_key=api_key, auth_token=auth_token)
 
         data = check_availability(
             session=session,

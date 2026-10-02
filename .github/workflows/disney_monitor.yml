@@ -28,6 +28,7 @@ jobs:
       - name: Consultar disponibilidad en Disney
         env:
           DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
+          DISNEY_REFRESH_TOKEN: ${{ secrets.DISNEY_REFRESH_TOKEN }}
           DISNEY_API_KEY: ${{ secrets.DISNEY_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TARGET_DATE: ${{ secrets.TARGET_DATE }}
