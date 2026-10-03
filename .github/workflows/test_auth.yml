@@ -16,20 +16,26 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Instalar dependencias
-        run: pip install -r requirements.txt
+      - name: Instalar dependencias y Playwright
+        run: |
+          pip install -r requirements.txt playwright
+          playwright install --with-deps chromium
 
-      - name: Probar autenticación y consulta única
+      - name: Probar login automático con Playwright
         env:
-          DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
           DISNEY_EMAIL: ${{ secrets.DISNEY_EMAIL }}
           DISNEY_PASSWORD: ${{ secrets.DISNEY_PASSWORD }}
           DISNEY_API_KEY: ${{ secrets.DISNEY_API_KEY }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID }}
           TARGET_DATE: ${{ secrets.TARGET_DATE }}
           PARTY_SIZE: ${{ secrets.PARTY_SIZE }}
-          MEAL_PERIOD: ${{ secrets.MEAL_PERIOD }}
-          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID }}
-          RESTAURANT_NAME: ${{ secrets.RESTAURANT_NAME }}
         run: |
-          python disney_monitor.py --once
+          python get_token_browser.py
+
+      - name: Guardar captura de pantalla en caso de error
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-error-screenshot
+          path: error_login.png
+          if-no-files-found: ignore
