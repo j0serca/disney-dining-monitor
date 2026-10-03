@@ -48,6 +48,9 @@ DISNEY_AVAILABILITY_URL = (
 DISNEY_REFRESH_URL = (
     "https://registerdisney.go.com/jgc/v8/client/TPR-DLP.WEB-PROD/guest/refresh-auth"
 )
+DISNEY_LOGIN_URL = (
+    "https://registerdisney.go.com/jgc/v8/client/TPR-DLP.WEB-PROD/guest/login"
+)
 BOOKING_PAGE_URL = "https://bookrestaurants.disneylandparis.com/en-int?id={restaurant_id}"
 
 # Configuración de registro (Logging)
@@ -107,6 +110,43 @@ def refresh_access_token(refresh_token: str) -> Optional[str]:
         return None
     except Exception as e:
         logger.warning(f"No se pudo contactar el servicio de refresh: {e}")
+        return None
+
+
+def login_with_credentials(email: str, password: str) -> Optional[str]:
+    """Inicia sesión directamente en Disney OneID para obtener un access_token autenticado."""
+    headers = {
+        "Accept": "*/*",
+        "Accept-Language": "es-US,es;q=0.9,en-US;q=0.8",
+        "Content-Type": "application/json",
+        "Origin": "https://bookrestaurants.disneylandparis.com",
+        "Referer": "https://bookrestaurants.disneylandparis.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    payload = {
+        "loginValue": email.strip(),
+        "password": password.strip(),
+    }
+    try:
+        response = requests.post(DISNEY_LOGIN_URL, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json().get("data", {})
+            token_obj = data.get("token", {}) if data else {}
+            access_token = token_obj.get("access_token")
+            scope = token_obj.get("scope", "")
+            if access_token:
+                logger.info(f"✨ ¡Inicio de sesión en Disney OneID EXITOSO! (Scope: {scope})")
+                return access_token
+        else:
+            logger.error(
+                f"❌ Error al iniciar sesión en Disney OneID (HTTP {response.status_code}): {response.text[:200]}"
+            )
+            return None
+    except Exception as e:
+        logger.error(f"❌ Excepción al conectar con el login de Disney: {e}")
         return None
 
 
@@ -370,6 +410,8 @@ def main():
 
     auth_token = os.getenv("DISNEY_AUTH_TOKEN")
     refresh_token = os.getenv("DISNEY_REFRESH_TOKEN")
+    disney_email = os.getenv("DISNEY_EMAIL")
+    disney_password = os.getenv("DISNEY_PASSWORD")
     api_key = os.getenv("DISNEY_API_KEY")
     ntfy_channel = os.getenv("NTFY_TOPIC")
     github_pat = os.getenv("GH_PAT")
@@ -385,8 +427,8 @@ def main():
     max_delay_mins = float(os.getenv("MAX_DELAY_MINUTES", "15"))
 
     missing = []
-    if not auth_token and not refresh_token:
-        missing.append("DISNEY_AUTH_TOKEN o DISNEY_REFRESH_TOKEN")
+    if not auth_token and not refresh_token and not (disney_email and disney_password):
+        missing.append("DISNEY_AUTH_TOKEN, DISNEY_REFRESH_TOKEN o credenciales (DISNEY_EMAIL y DISNEY_PASSWORD)")
     if not api_key:
         missing.append("DISNEY_API_KEY")
     if not ntfy_channel:
@@ -403,6 +445,15 @@ def main():
         sys.exit(1)
 
     party_size = int(party_size_raw)
+
+    if disney_email and disney_password:
+        logger.info(f"👤 Cuenta Disney : {mask_secret(disney_email, 6)}")
+        if not auth_token:
+            logger.info("🔑 Obteniendo token de alto privilegio mediante login automático...")
+            auth_token = login_with_credentials(disney_email, disney_password)
+            if not auth_token:
+                logger.error("❌ Falló la autenticación con las credenciales configuradas.")
+                sys.exit(1)
 
     mode_label = "MODO ONCE" if args.once else ("MODO RELEVO 24/7" if args.relay else "MODO LOCAL")
     logger.info("=" * 65)
@@ -465,7 +516,22 @@ def main():
             headers=headers,
         )
 
-        # Si el token falló y tenemos refresh_token, intentamos refrescar como fallback
+        # Si el token falló y tenemos credenciales, re-autenticamos directamente en OneID
+        if data is None and disney_email and disney_password:
+            logger.info("🔄 Token caducado o inválido. Re-autenticando en Disney OneID vía credenciales...")
+            fresh = login_with_credentials(disney_email, disney_password)
+            if fresh:
+                auth_token = fresh
+                headers = build_headers(api_key=api_key, auth_token=auth_token)
+                data = check_availability(
+                    session=session,
+                    restaurant_id=restaurant_id,
+                    target_date=target_date,
+                    party_size=party_size,
+                    headers=headers,
+                )
+
+        # Si aún no hay respuesta y tenemos refresh_token, intentamos refrescar como fallback
         if data is None and refresh_token:
             fresh = refresh_access_token(refresh_token)
             if fresh:
