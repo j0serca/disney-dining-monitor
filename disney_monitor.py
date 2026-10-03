@@ -94,8 +94,15 @@ def refresh_access_token(refresh_token: str) -> Optional[str]:
             data = response.json().get("data", {})
             token_obj = data.get("token", {}) if data else {}
             new_access_token = token_obj.get("access_token")
+            scope = token_obj.get("scope", "")
             if new_access_token:
-                logger.info("✨ Token de Disney renovado automáticamente vía OneID.")
+                if "UNSECURED" in scope:
+                    logger.warning(
+                        f"⚠️ Token renovado vía OneID tiene alcance limitado ('{scope}') "
+                        "y podría no ser aceptado por la API de restaurantes."
+                    )
+                else:
+                    logger.info("✨ Token de Disney renovado automáticamente vía OneID.")
                 return new_access_token
         return None
     except Exception as e:
@@ -289,6 +296,33 @@ def send_startup_ping(ntfy_url_or_topic: str, restaurant_name: str, target_date:
         logger.warning(f"No se pudo enviar ping de inicio: {e}")
 
 
+def send_token_expired_alert(ntfy_url_or_topic: str, restaurant_name: str) -> None:
+    """Envía alerta push a ntfy cuando el token de Disney expira."""
+    if not ntfy_url_or_topic:
+        return
+    url = (
+        ntfy_url_or_topic.strip()
+        if ntfy_url_or_topic.startswith("http")
+        else f"https://ntfy.sh/{ntfy_url_or_topic.strip()}"
+    )
+    headers = {
+        "Title": "ALERTA: TOKEN DE DISNEY EXPIRADO",
+        "Priority": "high",
+        "Tags": "warning,key",
+    }
+    message = (
+        f"⚠️ El token de Disney ha expirado tras horas de uso.\n\n"
+        f"El monitor de {restaurant_name} no puede consultar disponibilidad (error 403).\n\n"
+        f"👉 Abre https://bookrestaurants.disneylandparis.com y obtén un nuevo token para reactivarlo."
+    )
+    try:
+        res = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=10)
+        if res.status_code == 200:
+            logger.info("🚨 Alerta de token expirado enviada exitosamente a ntfy.")
+    except Exception as e:
+        logger.warning(f"No se pudo enviar alerta de expiración: {e}")
+
+
 def trigger_next_relay_workflow(repo_slug: str, pat_token: str) -> bool:
     """Dispara automáticamente el siguiente turno de 5 horas en GitHub Actions."""
     url = f"https://api.github.com/repos/{repo_slug}/actions/workflows/disney_monitor.yml/dispatches"
@@ -417,6 +451,7 @@ def main():
     start_time = time.time()
     max_seconds = args.max_hours * 3600
     iteration = 1
+    token_alert_sent = False
 
     while True:
         timestamp_str = datetime.now().strftime("%H:%M:%S")
@@ -445,6 +480,7 @@ def main():
                 )
 
         if data is not None:
+            token_alert_sent = False
             available_slots = parse_available_slots(data, target_period=meal_period)
             if available_slots:
                 logger.info("🎉" * 20)
@@ -457,6 +493,9 @@ def main():
                 )
         else:
             logger.warning("⚠️ No se pudo obtener respuesta válida en este intento.")
+            if not token_alert_sent:
+                send_token_expired_alert(ntfy_channel, restaurant_name)
+                token_alert_sent = True
 
         # Verificar si cumplimos el tiempo del turno para pasar el relevo
         elapsed = time.time() - start_time
