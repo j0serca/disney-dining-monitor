@@ -1,10 +1,19 @@
 name: Disney Dining Monitor
 
 on:
-  workflow_dispatch: # Permite iniciar el relevo o probarlo manualmente con 1 clic
+  workflow_dispatch:
+    inputs:
+      auth_token:
+        description: 'Nuevo token de Disney (opcional)'
+        required: false
+        type: string
   schedule:
-    # Mantenemos también un cron de respaldo cada 6 horas por si acaso
+    # Cron de respaldo cada 6 horas
     - cron: '0 */6 * * *'
+
+concurrency:
+  group: disney-dining-monitor
+  cancel-in-progress: true
 
 jobs:
   continuous-monitor:
@@ -27,7 +36,7 @@ jobs:
 
       - name: Monitoreo continuo con relevo automático
         env:
-          DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
+          DISNEY_AUTH_TOKEN: ${{ inputs.auth_token || secrets.DISNEY_AUTH_TOKEN }}
           DISNEY_REFRESH_TOKEN: ${{ secrets.DISNEY_REFRESH_TOKEN }}
           DISNEY_EMAIL: ${{ secrets.DISNEY_EMAIL }}
           DISNEY_PASSWORD: ${{ secrets.DISNEY_PASSWORD }}
