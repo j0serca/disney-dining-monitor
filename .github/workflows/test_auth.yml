@@ -1,0 +1,35 @@
+name: Test Disney Auth
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-auth:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar autenticación y consulta única
+        env:
+          DISNEY_AUTH_TOKEN: ${{ secrets.DISNEY_AUTH_TOKEN }}
+          DISNEY_EMAIL: ${{ secrets.DISNEY_EMAIL }}
+          DISNEY_PASSWORD: ${{ secrets.DISNEY_PASSWORD }}
+          DISNEY_API_KEY: ${{ secrets.DISNEY_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TARGET_DATE: ${{ secrets.TARGET_DATE }}
+          PARTY_SIZE: ${{ secrets.PARTY_SIZE }}
+          MEAL_PERIOD: ${{ secrets.MEAL_PERIOD }}
+          RESTAURANT_ID: ${{ secrets.RESTAURANT_ID }}
+          RESTAURANT_NAME: ${{ secrets.RESTAURANT_NAME }}
+        run: |
+          python disney_monitor.py --once

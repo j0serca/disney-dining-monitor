@@ -448,12 +448,15 @@ def main():
 
     if disney_email and disney_password:
         logger.info(f"👤 Cuenta Disney : {mask_secret(disney_email, 6)}")
-        if not auth_token:
-            logger.info("🔑 Obteniendo token de alto privilegio mediante login automático...")
-            auth_token = login_with_credentials(disney_email, disney_password)
-            if not auth_token:
-                logger.error("❌ Falló la autenticación con las credenciales configuradas.")
-                sys.exit(1)
+        logger.info("🔑 Autenticando en Disney OneID con credenciales...")
+        fresh_token = login_with_credentials(disney_email, disney_password)
+        if fresh_token:
+            auth_token = fresh_token
+        elif not auth_token:
+            logger.error("❌ Falló la autenticación con las credenciales configuradas y no hay token de respaldo.")
+            sys.exit(1)
+        else:
+            logger.warning("⚠️ No se pudo iniciar sesión con credenciales; usando DISNEY_AUTH_TOKEN de respaldo.")
 
     mode_label = "MODO ONCE" if args.once else ("MODO RELEVO 24/7" if args.relay else "MODO LOCAL")
     logger.info("=" * 65)
